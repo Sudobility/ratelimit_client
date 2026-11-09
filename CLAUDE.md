@@ -1,9 +1,9 @@
 # RateLimit Client
 
 > **Git policy — never auto-commit or auto-push.** Leave your work in the working tree.
-> Run `git commit`, `git push`, `gh pr create`, or `scripts/push_all.sh` **only when the user
-> explicitly asks in that turn**. Approval for an earlier change does not carry forward, and
-> finishing a task is not permission to commit it.
+> Run `git commit`, `git push`, or `gh pr create` **only when the user explicitly asks in
+> that turn**. Approval for an earlier change does not carry forward, and finishing a task
+> is not permission to commit it.
 
 React client library for Rate Limit API with hooks for fetching rate limit config and history.
 
@@ -14,8 +14,9 @@ React client library for Rate Limit API with hooks for fetching rate limit confi
 - **Language**: TypeScript
 - **Runtime**: Bun
 - **Package Manager**: Bun (do not use npm/yarn/pnpm for installing dependencies)
-- **Build**: TypeScript compiler (tsc)
-- **Test**: Vitest
+- **Build**: TypeScript compiler (`tsc`) + `scripts/fix-esm-imports.mjs` (rewrites relative imports to `.js` for ESM)
+- **Test**: Vitest (jsdom, globals enabled via `vitest.config.ts`)
+- **Registry**: Published to GitHub Packages (`@sudobility` scope → `npm.pkg.github.com`, see `.npmrc`)
 
 ## Project Structure
 
@@ -29,22 +30,29 @@ src/
 ├── network/              # HTTP client utilities
 │   ├── index.ts
 │   └── RateLimitClient.ts # API client class
-└── utils/                # Utility functions
-    ├── index.ts
-    └── ratelimit-helpers.ts # Helper functions
+├── utils/                # Utility functions
+│   ├── index.ts
+│   └── ratelimit-helpers.ts # Helper functions
+└── test/
+    └── setupDom.ts       # jsdom test setup helpers
 ```
+
+Tests are colocated (`*.test.ts`) and excluded from the build via `tsconfig.build.json`.
 
 ## Commands
 
 ```bash
+bun install          # Install deps (Bun only)
 bun run build        # Build to dist/
 bun run build:watch  # Watch mode build
 bun run clean        # Remove dist/
-bun run test         # Run Vitest tests
+bun run test:unit    # Run Vitest once  (NOTE: there is no `test` script)
+bun run test:watch   # Run Vitest in watch mode
 bun run lint         # Run ESLint
 bun run lint:fix     # Fix lint issues
-bun run typecheck    # TypeScript check
+bun run typecheck    # TypeScript check (tsc --noEmit)
 bun run format       # Format with Prettier
+bun run format:check # Check formatting
 ```
 
 ## API Client
@@ -53,7 +61,8 @@ bun run format       # Format with Prettier
 ```typescript
 import { RateLimitClient } from '@sudobility/ratelimit_client';
 
-const client = new RateLimitClient({ baseUrl, networkClient });
+// testMode?: true appends `testMode=true` to every request URL
+const client = new RateLimitClient({ baseUrl, networkClient, testMode: false });
 
 // Get rate limit config and current usage
 // rateLimitUserId is required (e.g., entity slug, user ID)
@@ -81,7 +90,7 @@ const {
   refreshHistory,   // Function to refresh history
   clearError,       // Clear error state
   reset,            // Reset all state
-} = useRateLimits(networkClient, baseUrl);
+} = useRateLimits(networkClient, baseUrl, /* testMode */ false);
 
 // Fetch config (rateLimitUserId is required)
 await refreshConfig(token, rateLimitUserId);
@@ -121,9 +130,13 @@ Required in consuming app:
 
 ## Publishing
 
+Published to **GitHub Packages** (`@sudobility` scope). CI (`.github/workflows/ci-cd.yml`)
+auto-publishes on push to `main`/`develop` via the reusable `johnqh/workflows` unified-cicd
+workflow with `publish-target: github`. `prepublishOnly` runs `clean` + `build` automatically.
+
 ```bash
-bun run prepublishOnly  # Clean + build
-npm publish             # Publish to npm
+bun run build  # or `bun run prepublishOnly` (clean + build)
+npm publish    # publishes to npm.pkg.github.com per .npmrc; CI normally does this
 ```
 
 ## Architecture
@@ -137,22 +150,11 @@ shapeshyft_app (frontend)
 sudojo_app (frontend)
 ```
 
-## Workspace Context
+## Workspace Context & Downstream Impact
 
-This project is part of the **ShapeShyft** multi-project workspace at the parent directory. See `../CLAUDE.md` for the full architecture, dependency graph, and build order.
-
-## Downstream Impact
-
-| Downstream Consumer | Relationship |
-|---------------------|-------------|
-| `ratelimit_pages` | Direct dependency - uses `useRateLimits` hook |
-| `shapeshyft_app` | Transitive via ratelimit_pages, and direct dependency |
-
-After making changes:
-1. Run checks (no `verify` script - see below)
-2. `npm publish`
-3. In `ratelimit_pages`: `bun update @sudobility/ratelimit_client` -> rebuild
-4. In `shapeshyft_app`: `bun update @sudobility/ratelimit_client` -> rebuild
+Part of the **ShapeShyft** multi-project workspace under `../`. Consumers: `ratelimit_pages`
+(direct, uses `useRateLimits`) and `shapeshyft_app` (direct + transitive via `ratelimit_pages`).
+After publishing, run `bun update @sudobility/ratelimit_client` + rebuild in each consumer.
 
 ## Local Dev Workflow
 
@@ -175,16 +177,19 @@ bun unlink @sudobility/ratelimit_client && bun install
 No `verify` script. Run checks manually:
 
 ```bash
-bun run typecheck && bun run lint && bun run test && bun run build
+bun run typecheck && bun run lint && bun run test:unit && bun run build
 ```
 
-Note: `bun run test` here runs once (not watch mode) due to `vitest run --environment jsdom`.
+Note: `test:unit` runs Vitest once (`vitest run`), not watch mode.
 
 ## Gotchas
 
 - **`rateLimitUserId` is a generic identifier** -- it can be an entity slug, user ID, or any identifier. Do not assume it is always a Firebase UID.
 - **Tests require jsdom environment** -- the test script passes `--environment jsdom`. Tests run in a browser-like environment.
 - **Types come from `@sudobility/types`, not this package** -- `RateLimitsConfigData`, `RateLimitHistoryData`, etc. are in the shared types package.
+- **`testMode`** -- both `RateLimitClient` and `useRateLimits` take an optional `testMode` flag that appends `testMode=true` to every request URL for server-side sandbox behavior.
+- **ESM import fixup** -- `bun run build` runs `scripts/fix-esm-imports.mjs` after `tsc` to rewrite relative imports to explicit `.js` extensions. Do not hand-edit `dist/`; the import rewrite is required for the package to resolve as pure ESM.
+- **No parent `CLAUDE.md`** -- there is currently no `../CLAUDE.md`; do not rely on one.
 
 ## Git Workflow
 
